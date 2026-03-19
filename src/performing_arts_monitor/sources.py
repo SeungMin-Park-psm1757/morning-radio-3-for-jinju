@@ -33,9 +33,10 @@ BLOCKED_MARKERS = (
     "forbidden",
     "verify you are human",
     "just a moment",
-    "captcha",
     "cf-browser-verification",
     "attention required",
+    "/cdn-cgi/challenge-platform/",
+    "cf-chl-",
 )
 
 OD_NOTICE_URL = "https://www.odmusical.com/audition/notice"
