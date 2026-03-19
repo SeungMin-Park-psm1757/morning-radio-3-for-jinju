@@ -133,8 +133,8 @@ def run_pipeline(config: AppConfig) -> Path:
     triaged_items = _triage_items(config, raw_items, now_utc)
     selected_items = _select_items(config, triaged_items)
     sections = _build_sections(selected_items)
-    digest = _build_digest(config, sections, now_utc)
-    message_digest = _render_message_digest(digest, config.timezone)
+    digest = _build_digest(config, sections, now_utc, source_errors)
+    message_digest = _render_message_digest(digest, config.timezone, source_errors)
 
     _write_json(
         run_dir / "raw_items.json",
@@ -259,7 +259,7 @@ def _merge_assessment(
     final_score = local["local_score"]
     if llm:
         final_score = round((local["local_score"] * 0.6) + (llm_score * 0.4), 1)
-    keep = bool(llm_keep and llm_relevant and final_score >= local["score_threshold"])
+    keep = bool(llm_keep and llm_relevant and final_score >= local["candidate_threshold"])
     secondary_tags = (
         [str(tag).strip() for tag in llm.get("secondary_tags", []) if str(tag).strip()]
         if llm
@@ -366,6 +366,14 @@ def _local_assessment(
     actionability = 0.0
     if category in {"audition", "support"}:
         actionability += 10.0
+        if "마감임박" in secondary_tags:
+            actionability += 3.0
+        if item.attachments:
+            actionability += 2.5
+        if item.external_urls:
+            actionability += 2.5
+        if any(term in text.lower() for term in ("지원서", "지원 방법", "첨부파일", "forms.gle", "구글폼")):
+            actionability += 2.0
     elif "채용" in secondary_tags or category == "company_news":
         actionability += 7.0
     elif category == "works_casting":
@@ -411,7 +419,8 @@ def _local_assessment(
         1,
     )
 
-    keep = bool(category in CATEGORY_LABELS and local_score >= max(30.0, config.score_threshold - 20.0))
+    candidate_threshold = max(40.0, config.score_threshold - 10.0)
+    keep = bool(category in CATEGORY_LABELS and local_score >= candidate_threshold)
     exclude_reason = ""
     if category == "company_news" and not (headline_keywords or headline_people or mentioned_works):
         keep = False
@@ -433,6 +442,7 @@ def _local_assessment(
         "one_line_summary": one_line_summary,
         "local_score": local_score,
         "score_threshold": config.score_threshold,
+        "candidate_threshold": candidate_threshold,
         "keep": keep,
         "exclude_reason": exclude_reason,
         "relevance_confidence": relevance_confidence,
@@ -441,15 +451,15 @@ def _local_assessment(
 
 
 def _select_items(config: AppConfig, triaged_items: list[TriagedItem]) -> list[TriagedItem]:
-    candidates = [
+    strict_candidates = [
         item
         for item in triaged_items
         if item.keep and item.final_score >= config.score_threshold and item.category in CATEGORY_LABELS
     ]
-    candidates.sort(key=lambda item: (item.final_score, item.published_at), reverse=True)
+    strict_candidates.sort(key=lambda item: (item.final_score, item.published_at), reverse=True)
 
     by_category = {key: [] for key in CATEGORY_ORDER}
-    for item in candidates:
+    for item in strict_candidates:
         by_category.setdefault(item.category, []).append(item)
 
     selected: list[TriagedItem] = []
@@ -465,7 +475,7 @@ def _select_items(config: AppConfig, triaged_items: list[TriagedItem]) -> list[T
         if len(selected) >= config.max_total_items:
             return selected
 
-    for item in candidates:
+    for item in strict_candidates:
         if item.fingerprint in selected_ids:
             continue
         category_items = [selected_item for selected_item in selected if selected_item.category == item.category]
@@ -476,7 +486,46 @@ def _select_items(config: AppConfig, triaged_items: list[TriagedItem]) -> list[T
         if len(selected) >= config.max_total_items:
             break
 
-    return sorted(selected, key=lambda item: (CATEGORY_ORDER.index(item.category), -item.final_score))
+    if selected:
+        return sorted(selected, key=lambda item: (CATEGORY_ORDER.index(item.category), -item.final_score))
+
+    fallback_threshold = max(45.0, config.score_threshold - 8.0)
+    fallback_candidates = [
+        item
+        for item in triaged_items
+        if item.keep
+        and item.final_score >= fallback_threshold
+        and item.category in {"audition", "support", "people", "works_casting"}
+        and ("티켓오픈" not in item.secondary_tags or bool(item.mentioned_people))
+    ]
+    fallback_candidates.sort(
+        key=lambda item: (
+            item.category in {"audition", "support"},
+            bool(item.external_urls or item.attachments),
+            bool(item.mentioned_people),
+            item.final_score,
+            item.published_at,
+        ),
+        reverse=True,
+    )
+
+    fallback_selected: list[TriagedItem] = []
+    category_counts: dict[str, int] = {}
+    for item in fallback_candidates:
+        category_count = category_counts.get(item.category, 0)
+        if category_count >= min(2, config.max_items_per_category):
+            continue
+        if item.watch_point:
+            if "원문 확인" not in item.watch_point:
+                item.watch_point = f"{item.watch_point}; 원문 확인 권장"
+        else:
+            item.watch_point = "원문 확인 권장"
+        fallback_selected.append(item)
+        category_counts[item.category] = category_count + 1
+        if len(fallback_selected) >= min(3, config.max_total_items):
+            break
+
+    return sorted(fallback_selected, key=lambda item: (CATEGORY_ORDER.index(item.category), -item.final_score))
 
 
 def _build_sections(items: list[TriagedItem]) -> list[DigestSection]:
@@ -496,10 +545,15 @@ def _build_sections(items: list[TriagedItem]) -> list[DigestSection]:
     return sections
 
 
-def _build_digest(config: AppConfig, sections: list[DigestSection], now_utc: datetime) -> DigestRun:
+def _build_digest(
+    config: AppConfig,
+    sections: list[DigestSection],
+    now_utc: datetime,
+    source_errors: dict[str, str],
+) -> DigestRun:
     local_now = now_utc.astimezone(config.timezone)
     title = f"{local_now.strftime('%Y-%m-%d')} 한국 뮤지컬/공연예술 모니터"
-    intro = _build_intro(sections)
+    intro = _build_intro(sections, source_errors)
     return DigestRun(
         title=title,
         intro=intro,
@@ -508,17 +562,25 @@ def _build_digest(config: AppConfig, sections: list[DigestSection], now_utc: dat
     )
 
 
-def _build_intro(sections: list[DigestSection]) -> str:
+def _build_intro(sections: list[DigestSection], source_errors: dict[str, str]) -> str:
     total = sum(len(section.items) for section in sections)
     if total == 0:
+        if source_errors:
+            return "오늘은 선별 항목이 없었고 일부 소스 수집에 실패했습니다."
         return "오늘은 기준 점수를 넘는 공식 공지나 업계 동향이 많지 않았습니다."
 
     parts = [f"{section.label} {len(section.items)}건" for section in sections]
     joined = ", ".join(parts)
+    if source_errors:
+        return f"오늘은 {joined}을 추렸고 일부 소스 수집 오류가 있었습니다."
     return f"오늘은 {joined}을 추렸습니다."
 
 
-def _render_message_digest(digest: DigestRun, timezone: ZoneInfo) -> str:
+def _render_message_digest(
+    digest: DigestRun,
+    timezone: ZoneInfo,
+    source_errors: dict[str, str],
+) -> str:
     lines = [f"# {digest.title}", "", digest.intro]
     for section in digest.sections:
         lines.append("")
@@ -533,6 +595,11 @@ def _render_message_digest(digest: DigestRun, timezone: ZoneInfo) -> str:
             )
             lines.append(f"  링크: {item.canonical_url}")
             lines.append("")
+    if source_errors:
+        lines.append("")
+        lines.append("## 수집 상태")
+        for key in sorted(source_errors):
+            lines.append(f"- {key}: 수집 실패")
     return "\n".join(lines).strip() + "\n"
 
 
@@ -745,10 +812,12 @@ def _duplicate_key_fallback(
         parts.append(mentioned_works[0].lower())
     if mentioned_people:
         parts.append(mentioned_people[0].lower())
+    title_key = re.sub(r"[^0-9a-z가-힣]+", "-", title.lower()).strip("-")
+    if title_key and not (mentioned_works or mentioned_people):
+        parts.append(title_key[:64])
     if secondary_tags:
         parts.append(secondary_tags[0].lower())
     if len(parts) == 1:
-        title_key = re.sub(r"[^0-9a-z가-힣]+", "-", title.lower()).strip("-")
         parts.append(title_key[:64])
     return "|".join(parts)
 

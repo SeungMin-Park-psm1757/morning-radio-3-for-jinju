@@ -2,6 +2,11 @@ name: Daily Performing Arts Monitor
 
 on:
   workflow_dispatch:
+    inputs:
+      hours_back:
+        description: "Manual run override in hours. Leave empty to use the scheduled window logic."
+        required: false
+        default: "72"
   schedule:
     - cron: "0 0 * * 1-5"
 
@@ -18,6 +23,7 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+      PERFORMING_ARTS_MONITOR_HOURS_BACK: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.hours_back || '' }}
       PERFORMING_ARTS_MONITOR_TELEGRAM_SILENT: ${{ vars.PERFORMING_ARTS_MONITOR_TELEGRAM_SILENT }}
       PERFORMING_ARTS_MONITOR_PUBLIC_ARCHIVE_BASE_URL: ${{ vars.PERFORMING_ARTS_MONITOR_PUBLIC_ARCHIVE_BASE_URL }}
       PERFORMING_ARTS_MONITOR_SCHEDULE_HOUR_LOCAL: "9"
@@ -49,6 +55,10 @@ jobs:
       - name: Publish run summary
         run: |
           latest_dir="$(find output -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | tail -n 1)"
+          echo "## Digest" >> "$GITHUB_STEP_SUMMARY"
+          cat "output/${latest_dir}/message_digest.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Run Summary" >> "$GITHUB_STEP_SUMMARY"
           cat "output/${latest_dir}/summary.md" >> "$GITHUB_STEP_SUMMARY"
         shell: bash
 

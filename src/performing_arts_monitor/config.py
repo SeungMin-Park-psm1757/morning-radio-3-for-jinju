@@ -177,7 +177,7 @@ def load_config(args: argparse.Namespace) -> AppConfig:
         max_items_per_category=int(os.getenv("PERFORMING_ARTS_MONITOR_MAX_ITEMS_PER_CATEGORY", "3")),
         score_threshold=float(os.getenv("PERFORMING_ARTS_MONITOR_SCORE_THRESHOLD", "55")),
         max_source_items=int(os.getenv("PERFORMING_ARTS_MONITOR_MAX_SOURCE_ITEMS", "20")),
-        request_timeout_seconds=int(os.getenv("PERFORMING_ARTS_MONITOR_REQUEST_TIMEOUT_SECONDS", "20")),
+        request_timeout_seconds=int(os.getenv("PERFORMING_ARTS_MONITOR_REQUEST_TIMEOUT_SECONDS", "30")),
         skip_llm=args.skip_llm,
         tracked_people=_csv_env(
             "PERFORMING_ARTS_MONITOR_TRACKED_PEOPLE",

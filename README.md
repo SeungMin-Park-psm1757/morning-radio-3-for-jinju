@@ -90,5 +90,6 @@ The workflow is defined in `.github/workflows/daily-monitor.yml`.
 
 - Schedule: weekdays `09:00 KST`
 - Default collection window: from the previous scheduled write slot to the current run time
+- Manual `workflow_dispatch` runs default to a `72h` override for easier validation
 - Telegram delivery is enabled when Telegram secrets are present
 - Manual runs are supported with `workflow_dispatch`

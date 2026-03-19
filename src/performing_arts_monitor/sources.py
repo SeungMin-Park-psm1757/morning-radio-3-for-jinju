@@ -4,6 +4,7 @@ import hashlib
 import html
 import json
 import re
+import time as time_module
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urljoin, urlparse
@@ -227,6 +228,7 @@ def _collect_feed_source(
         body_text = detail.body_text or _clean_html(entry.get("summary", ""))
         summary = detail.summary or _first_sentences(body_text or title)
         resolved_url = detail.resolved_url or raw_url
+        effective_published_at = _resolved_published_at(published_at, detail.published_at, cutoff=cutoff, now=now)
         url = resolved_url
         if source.site_name == "OTR":
             promoted = _promote_external_url(detail.external_urls)
@@ -241,7 +243,7 @@ def _collect_feed_source(
                 source_kind=source.source_kind,
                 title=title,
                 url=url,
-                published_at=detail.published_at or published_at,
+                published_at=effective_published_at,
                 summary=summary,
                 body_text=body_text,
                 attachments=detail.attachments,
@@ -285,6 +287,7 @@ def _collect_feed_fallback_table(
         body_text = detail.body_text
         summary = detail.summary or _first_sentences(body_text or title)
         resolved_url = detail.resolved_url or raw_url
+        effective_published_at = _resolved_published_at(published_at, detail.published_at, cutoff=cutoff, now=now)
         url = resolved_url
         if source.site_name == "OTR":
             promoted = _promote_external_url(detail.external_urls)
@@ -299,7 +302,7 @@ def _collect_feed_fallback_table(
                 source_kind=source.source_kind,
                 title=title,
                 url=url,
-                published_at=detail.published_at or published_at,
+                published_at=effective_published_at,
                 summary=summary,
                 body_text=body_text,
                 attachments=detail.attachments,
@@ -336,6 +339,7 @@ def _collect_od_source(
             continue
 
         detail = _detail_from_url(detail_url, source.key, config)
+        effective_published_at = _resolved_published_at(published_at, detail.published_at, cutoff=cutoff, now=now)
         items.append(
             CollectedItem(
                 source_key=source.key,
@@ -344,7 +348,7 @@ def _collect_od_source(
                 source_kind=source.source_kind,
                 title=title,
                 url=detail.resolved_url or detail_url,
-                published_at=detail.published_at or published_at,
+                published_at=effective_published_at,
                 summary=detail.summary or _first_sentences(detail.body_text or title),
                 body_text=detail.body_text,
                 attachments=detail.attachments,
@@ -379,6 +383,7 @@ def _collect_shownote_notice(
             continue
         detail_url = f"https://www.shownote.com/Community/BoardNotice/Details?articleId={article_id}"
         detail = _detail_from_url(detail_url, source.key, config)
+        effective_published_at = _resolved_published_at(published_at, detail.published_at, cutoff=cutoff, now=now)
         items.append(
             CollectedItem(
                 source_key=source.key,
@@ -387,7 +392,7 @@ def _collect_shownote_notice(
                 source_kind=source.source_kind,
                 title=title,
                 url=detail.resolved_url or detail_url,
-                published_at=detail.published_at or published_at,
+                published_at=effective_published_at,
                 summary=detail.summary or _first_sentences(detail.body_text or title),
                 body_text=detail.body_text,
                 attachments=detail.attachments,
@@ -422,6 +427,7 @@ def _collect_snco_source(
         if not title or not detail_url or published_at is None or published_at < cutoff:
             continue
         detail = _detail_from_url(detail_url, source.key, config)
+        effective_published_at = _resolved_published_at(published_at, detail.published_at, cutoff=cutoff, now=now)
         items.append(
             CollectedItem(
                 source_key=source.key,
@@ -430,7 +436,7 @@ def _collect_snco_source(
                 source_kind=source.source_kind,
                 title=title,
                 url=detail.resolved_url or detail_url,
-                published_at=detail.published_at or published_at,
+                published_at=effective_published_at,
                 summary=detail.summary or _first_sentences(detail.body_text or title),
                 body_text=detail.body_text,
                 attachments=detail.attachments,
@@ -469,6 +475,7 @@ def _collect_iseensee_notice(
             continue
         detail_url = f"https://m.iseensee.com/Community/NoticeRead.aspx?page=1&id={article_id}"
         detail = _detail_from_url(detail_url, source.key, config)
+        effective_published_at = _resolved_published_at(published_at, detail.published_at, cutoff=cutoff, now=now)
         items.append(
             CollectedItem(
                 source_key=source.key,
@@ -477,7 +484,7 @@ def _collect_iseensee_notice(
                 source_kind=source.source_kind,
                 title=title,
                 url=detail.resolved_url or detail_url,
-                published_at=detail.published_at or published_at,
+                published_at=effective_published_at,
                 summary=detail.summary or _first_sentences(detail.body_text or title),
                 body_text=detail.body_text,
                 attachments=detail.attachments,
@@ -572,6 +579,7 @@ def _collect_acomm_notice(
         if not title or not detail_url or published_at is None or published_at < cutoff:
             continue
         detail = _detail_from_url(detail_url, source.key, config)
+        effective_published_at = _resolved_published_at(published_at, detail.published_at, cutoff=cutoff, now=now)
         items.append(
             CollectedItem(
                 source_key=source.key,
@@ -580,7 +588,7 @@ def _collect_acomm_notice(
                 source_kind=source.source_kind,
                 title=title,
                 url=detail.resolved_url or detail_url,
-                published_at=detail.published_at or published_at,
+                published_at=effective_published_at,
                 summary=detail.summary or _first_sentences(detail.body_text or title),
                 body_text=detail.body_text,
                 attachments=detail.attachments,
@@ -775,18 +783,13 @@ def _extract_board_row_datetime(
     config: AppConfig,
 ) -> datetime | None:
     cell_texts = [_normalize_whitespace(getattr(cell, "get_text")(" ", strip=True)) for cell in cells]
-    candidates: list[str] = []
     if source_key.startswith("emk_") and len(cell_texts) >= 4:
-        candidates.append(cell_texts[3])
-    elif source_key.startswith("otr_"):
-        candidates.extend(text for text in reversed(cell_texts[-3:]) if text)
-    candidates.append(_normalize_whitespace(row_text))
-
-    for candidate in candidates:
-        parsed = _parse_datetime(candidate, config) or _extract_first_datetime(candidate, config)
-        if parsed is not None:
-            return parsed
-    return None
+        return _parse_datetime(cell_texts[3], config)
+    if source_key == "otr_notice" and len(cell_texts) >= 4:
+        return _parse_datetime(cell_texts[3], config)
+    if source_key == "otr_audition" and len(cell_texts) >= 6:
+        return _parse_datetime(cell_texts[5], config)
+    return _extract_first_datetime(_normalize_whitespace(row_text), config)
 
 
 def _extract_angular_json_array(text: str, scope_name: str) -> list[dict[str, object]]:
@@ -857,6 +860,8 @@ def _parse_datetime(value: str, config: AppConfig) -> datetime | None:
     if not text:
         return None
     text = text.replace("작성일", "").strip()
+    if not any(separator in text for separator in ("-", ".", "/")):
+        return None
     match = re.fullmatch(r"(\d{2})[./](\d{2})[./](\d{2})(?:\s+(\d{2}:\d{2}))?", text)
     if match:
         year, month, day, time_part = match.groups()
@@ -871,6 +876,22 @@ def _parse_datetime(value: str, config: AppConfig) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=config.timezone)
     return parsed.astimezone(UTC)
+
+
+def _resolved_published_at(
+    list_published_at: datetime,
+    detail_published_at: datetime | None,
+    *,
+    cutoff: datetime,
+    now: datetime,
+) -> datetime:
+    if detail_published_at is None:
+        return list_published_at
+    if detail_published_at < cutoff:
+        return list_published_at
+    if detail_published_at > now:
+        return list_published_at
+    return detail_published_at
 
 
 def _node_text(node: BeautifulSoup) -> str:
@@ -923,20 +944,31 @@ def _fingerprint(title: str, url: str, source_key: str) -> str:
 
 
 def _get(url: str, config: AppConfig, **kwargs: object) -> requests.Response:
-    response = requests.get(
-        url,
-        headers=REQUEST_HEADERS,
-        timeout=config.request_timeout_seconds,
-        **kwargs,
-    )
-    response.raise_for_status()
-    response.encoding = response.apparent_encoding or response.encoding
-    content_type = (response.headers.get("content-type") or "").lower()
-    if "text/html" in content_type:
-        lowered = response.text[:12000].lower()
-        if any(marker in lowered for marker in BLOCKED_MARKERS):
-            raise ValueError(f"Blocked or challenge page detected for {url}")
-    return response
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            response = requests.get(
+                url,
+                headers=REQUEST_HEADERS,
+                timeout=config.request_timeout_seconds,
+                **kwargs,
+            )
+            response.raise_for_status()
+            response.encoding = response.apparent_encoding or response.encoding
+            content_type = (response.headers.get("content-type") or "").lower()
+            if "text/html" in content_type:
+                lowered = response.text[:12000].lower()
+                if any(marker in lowered for marker in BLOCKED_MARKERS):
+                    raise ValueError(f"Blocked or challenge page detected for {url}")
+            return response
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            last_error = exc
+            if attempt == 2:
+                raise
+            time_module.sleep(1.5 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"Failed to fetch {url}")
 
 
 def _get_soup(url: str, config: AppConfig) -> BeautifulSoup:
