@@ -1,0 +1,2 @@
+[console_scripts]
+performing-arts-monitor = performing_arts_monitor.cli:main

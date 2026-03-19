@@ -1,0 +1,103 @@
+Metadata-Version: 2.4
+Name: performing-arts-monitor
+Version: 0.1.0
+Summary: Daily Korean musical and performing arts monitor powered by Gemini and GitHub Actions.
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: beautifulsoup4>=4.12.3
+Requires-Dist: feedparser>=6.0.11
+Requires-Dist: google-genai>=1.66.0
+Requires-Dist: python-dateutil>=2.9.0
+Requires-Dist: requests>=2.32.0
+
+# Performing Arts Monitor
+
+Performing Arts Monitor builds a daily Korean musical and performing arts digest and ships it as:
+
+- a collected-item archive
+- a triaged and deduplicated digest
+- a Telegram text message
+- a simple HTML archive page
+
+## What It Does
+
+- Collects official notices, auditions, company updates, and industry items from Korean musical and performing arts sites.
+- Uses RSS first where available, then falls back to HTML parsing.
+- Applies local scoring for source trust, recency, actionability, and tracked people or keyword hits.
+- Uses Gemini for relevance filtering, category classification, semantic deduplication, importance judgment, and one-line summaries.
+- Writes per-run output plus an HTML archive index.
+
+## Quick Start
+
+```bash
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e .
+copy .env.example .env
+```
+
+Set `GEMINI_API_KEY` in `.env`, then run:
+
+```bash
+performing-arts-monitor
+```
+
+For a no-API smoke test:
+
+```bash
+performing-arts-monitor --skip-llm
+```
+
+## Main Outputs
+
+Each run writes to `output/YYYYMMDD-HHMMSS/`.
+
+- `raw_items.json`: all collected raw items
+- `triaged_items.json`: Gemini or heuristic triage results
+- `selected_items.json`: final selected representatives
+- `digest.json`: machine-readable digest
+- `message_digest.md`: Telegram-friendly digest
+- `summary.md`: run summary
+- `index.html`: run-level archive page
+- `run_metadata.json`: machine-readable run metadata
+
+The root `output/index.html` file lists recent runs as a lightweight archive page.
+
+## Key Environment Variables
+
+- `GEMINI_API_KEY`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `TELEGRAM_THREAD_ID`
+- `PERFORMING_ARTS_MONITOR_TELEGRAM_SILENT`
+- `PERFORMING_ARTS_MONITOR_HOURS_BACK`
+- `PERFORMING_ARTS_MONITOR_OUTPUT_DIR`
+- `PERFORMING_ARTS_MONITOR_TIMEZONE`
+- `PERFORMING_ARTS_MONITOR_TRIAGE_MODEL`
+- `PERFORMING_ARTS_MONITOR_MAX_TOTAL_ITEMS`
+- `PERFORMING_ARTS_MONITOR_MAX_ITEMS_PER_CATEGORY`
+- `PERFORMING_ARTS_MONITOR_SCORE_THRESHOLD`
+- `PERFORMING_ARTS_MONITOR_PUBLIC_ARCHIVE_BASE_URL`
+- `PERFORMING_ARTS_MONITOR_TRACKED_PEOPLE`
+- `PERFORMING_ARTS_MONITOR_TRACKED_KEYWORDS`
+
+## Sources
+
+The initial MVP collects from:
+
+- EMK
+- OTR
+- OD Musical
+- Shownote
+- SNCO
+- Shinsee Company
+- CJ ENM Performing Arts and Newsroom
+- ACOM
+
+## GitHub Actions
+
+The workflow is defined in `.github/workflows/daily-monitor.yml`.
+
+- Schedule: daily `06:00 KST`
+- Telegram delivery is enabled when Telegram secrets are present
+- Manual runs are supported with `workflow_dispatch`
