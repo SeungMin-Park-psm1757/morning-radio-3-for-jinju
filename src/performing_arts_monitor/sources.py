@@ -16,7 +16,26 @@ from dateutil import parser as date_parser
 from performing_arts_monitor.config import AppConfig
 from performing_arts_monitor.models import CollectedItem, SourceDefinition
 
-USER_AGENT = "Mozilla/5.0 (compatible; PerformingArtsMonitor/0.1; +https://github.com/actions)"
+REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/133.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
+BLOCKED_MARKERS = (
+    "access denied",
+    "forbidden",
+    "verify you are human",
+    "just a moment",
+    "captcha",
+    "cf-browser-verification",
+    "attention required",
+)
 
 OD_NOTICE_URL = "https://www.odmusical.com/audition/notice"
 OD_NEWS_URL = "https://www.odmusical.com/audition/notice2"
@@ -906,12 +925,17 @@ def _fingerprint(title: str, url: str, source_key: str) -> str:
 def _get(url: str, config: AppConfig, **kwargs: object) -> requests.Response:
     response = requests.get(
         url,
-        headers={"User-Agent": USER_AGENT},
+        headers=REQUEST_HEADERS,
         timeout=config.request_timeout_seconds,
         **kwargs,
     )
     response.raise_for_status()
     response.encoding = response.apparent_encoding or response.encoding
+    content_type = (response.headers.get("content-type") or "").lower()
+    if "text/html" in content_type:
+        lowered = response.text[:12000].lower()
+        if any(marker in lowered for marker in BLOCKED_MARKERS):
+            raise ValueError(f"Blocked or challenge page detected for {url}")
     return response
 
 
