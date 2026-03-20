@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import math
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote, quote_plus, urlparse
 
 import feedparser
 import requests
+from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
 from performing_arts_monitor.config import AppConfig
@@ -20,6 +22,19 @@ NEWS_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/133.0.0.0 Safari/537.36"
+)
+ARTICLE_BODY_SELECTORS = (
+    "article",
+    "#dic_area",
+    ".article_view",
+    ".article_body",
+    ".news_view",
+    ".story-body",
+    ".article-body",
+    ".main_contents",
+    ".news_end",
+    ".post-content",
+    ".article_txt",
 )
 
 PERFORMANCE_CONTEXT_TERMS = (
@@ -108,6 +123,8 @@ def collect_keyword_news(
 ) -> list[CollectedItem]:
     queries = _build_queries(config, hours_back=max(24, math.ceil((now - start_utc).total_seconds() / 3600.0)))
     collected: dict[str, CollectedItem] = {}
+    resolved_url_cache: dict[str, str] = {}
+    article_cache: dict[str, tuple[str, str, str | None]] = {}
 
     for query in queries:
         url = GOOGLE_NEWS_SEARCH.format(query=quote_plus(query.query))
@@ -137,8 +154,27 @@ def collect_keyword_news(
             if not _looks_relevant(combined, matched_people, matched_keywords):
                 continue
 
-            fingerprint = _fingerprint(title, source_name, link)
-            source_weight = _source_weight(source_name, link, matched_people, matched_keywords, combined)
+            resolved_url = resolved_url_cache.get(link)
+            if resolved_url is None:
+                resolved_url = _resolve_google_news_url(link, timeout=config.request_timeout_seconds) or link
+                resolved_url_cache[link] = resolved_url
+            article_payload = article_cache.get(resolved_url)
+            if article_payload is None:
+                article_payload = _fetch_article_detail(resolved_url, timeout=config.request_timeout_seconds)
+                article_cache[resolved_url] = article_payload
+            article_summary, article_body, article_url = article_payload
+            effective_url = article_url or resolved_url
+            if article_summary:
+                summary = article_summary
+            if article_body:
+                combined = _normalize_whitespace(" ".join(value for value in (title, summary, article_body, source_name) if value))
+                matched_people = _find_mentions(combined, config.tracked_people)
+                matched_keywords = _find_mentions(combined, config.tracked_keywords)
+                if not _looks_relevant(combined, matched_people, matched_keywords):
+                    continue
+
+            fingerprint = _fingerprint(title, source_name, effective_url)
+            source_weight = _source_weight(source_name, effective_url, matched_people, matched_keywords, combined)
             collected.setdefault(
                 fingerprint,
                 CollectedItem(
@@ -147,10 +183,10 @@ def collect_keyword_news(
                     site_name=source_name or "Google News",
                     source_kind="news_search",
                     title=title,
-                    url=link,
+                    url=effective_url,
                     published_at=published_at,
                     summary=summary,
-                    body_text=summary,
+                    body_text=article_body or summary,
                     attachments=[],
                     external_urls=[],
                     source_weight=source_weight,
@@ -160,6 +196,7 @@ def collect_keyword_news(
                         "query_label": query.label,
                         "matched_people": matched_people,
                         "matched_keywords": matched_keywords,
+                        "source_url": link,
                     },
                 ),
             )
@@ -244,6 +281,102 @@ def _clean_html(value: str) -> str:
     return _normalize_whitespace(text)[:800]
 
 
+def _resolve_google_news_url(source_url: str, *, timeout: int) -> str | None:
+    try:
+        parsed = urlparse(source_url)
+        parts = [part for part in parsed.path.split("/") if part]
+        if parsed.netloc != "news.google.com" or len(parts) < 2 or parts[-2] not in {"articles", "rss", "read"}:
+            return source_url
+        base64_str = parts[-1]
+        timestamp_match = None
+        signature_match = None
+        for article_page_url in (
+            f"https://news.google.com/articles/{base64_str}",
+            f"https://news.google.com/rss/articles/{base64_str}",
+        ):
+            article_page = requests.get(
+                article_page_url,
+                timeout=timeout,
+                headers={"User-Agent": NEWS_USER_AGENT, "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"},
+            )
+            if article_page.status_code >= 400:
+                continue
+            timestamp_value = re.search(r'data-n-a-ts="([^"]+)"', article_page.text)
+            signature_value = re.search(r'data-n-a-sg="([^"]+)"', article_page.text)
+            if timestamp_value and signature_value:
+                timestamp_match = timestamp_value.group(1)
+                signature_match = signature_value.group(1)
+                break
+        if not timestamp_match or not signature_match:
+            return None
+
+        payload = [
+            "Fbv4je",
+            (
+                f'["garturlreq",[["X","X",["X","X"],null,null,1,1,"KR:ko",null,1,null,null,null,null,null,0,1],'
+                f'"X","X",1,[1,1,1],1,1,null,0,0,null,0],"{base64_str}",{timestamp_match},"{signature_match}"]'
+            ),
+        ]
+        response = requests.post(
+            "https://news.google.com/_/DotsSplashUi/data/batchexecute",
+            timeout=timeout,
+            headers={
+                "User-Agent": NEWS_USER_AGENT,
+                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+            },
+            data="f.req=" + quote(json.dumps([[payload]])),
+        )
+        response.raise_for_status()
+        if "\n\n" not in response.text:
+            return None
+        parsed_payload = json.loads(response.text.split("\n\n", 1)[1])[:-2]
+        return str(json.loads(parsed_payload[0][2])[1]).strip() or None
+    except Exception:
+        return None
+
+
+def _fetch_article_detail(url: str, *, timeout: int) -> tuple[str, str, str | None]:
+    try:
+        response = requests.get(
+            url,
+            timeout=timeout,
+            headers={"User-Agent": NEWS_USER_AGENT, "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"},
+        )
+        response.raise_for_status()
+        content_type = (response.headers.get("content-type") or "").lower()
+        if "text/html" not in content_type:
+            return "", "", response.url
+        soup = BeautifulSoup(response.text[:900000], "html.parser")
+        summary = (
+            _extract_meta_content(soup, "og:description", "property")
+            or _extract_meta_content(soup, "description", "name")
+            or _extract_meta_content(soup, "twitter:description", "name")
+        )
+        body_text = ""
+        for selector in ARTICLE_BODY_SELECTORS:
+            node = soup.select_one(selector)
+            if node is None:
+                continue
+            text = _normalize_whitespace(node.get_text(" ", strip=True))
+            if len(text) >= 120:
+                body_text = text[:3200]
+                break
+        if not body_text:
+            body_text = _normalize_whitespace(soup.get_text(" ", strip=True))[:3200]
+        if (not summary or len(summary) < 20 or summary.lower() in {"msn", "google 뉴스", "google news"}) and body_text:
+            summary = _first_sentences(body_text)
+        return summary, body_text, response.url
+    except Exception:
+        return "", "", None
+
+
+def _extract_meta_content(soup: BeautifulSoup, key: str, attribute: str) -> str:
+    tag = soup.find("meta", attrs={attribute: key})
+    if tag and tag.get("content"):
+        return _normalize_whitespace(html.unescape(str(tag.get("content"))))
+    return ""
+
+
 def _looks_relevant(text: str, matched_people: list[str], matched_keywords: list[str]) -> bool:
     lowered = text.lower()
     has_context = any(term.lower() in lowered for term in PERFORMANCE_CONTEXT_TERMS)
@@ -299,3 +432,15 @@ def _fingerprint(title: str, source_name: str, url: str) -> str:
 
 def _normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _first_sentences(text: str, *, max_chars: int = 240) -> str:
+    cleaned = _normalize_whitespace(text)
+    cleaned = re.sub(r"^\[[^\]]{0,80}\]\s*", "", cleaned)
+    cleaned = re.sub(r"^[가-힣A-Za-z0-9·\s]+?\|\s*[가-힣A-Za-z0-9·\s]{0,40}기자\s*", "", cleaned)
+    if len(cleaned) <= max_chars:
+        return cleaned
+    match = re.match(r"(.{40,240}?[.!?])(?:\s|$)", cleaned)
+    if match:
+        return match.group(1).strip()
+    return cleaned[: max_chars - 1].rstrip() + "…"

@@ -700,7 +700,6 @@ def _render_message_digest(
             lines.append(
                 f"  출처: {item.site_name} | {item.published_at.astimezone(timezone).strftime('%Y-%m-%d')}"
             )
-            lines.append(f"  링크: {item.canonical_url}")
             lines.append("")
     if source_errors:
         lines.append("")
