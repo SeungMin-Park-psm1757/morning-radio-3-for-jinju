@@ -13,6 +13,7 @@ Performing Arts Monitor builds a daily Korean musical and performing arts digest
 - Uses RSS first where available, then falls back to HTML parsing.
 - Applies local scoring for source trust, recency, actionability, and tracked people or keyword hits.
 - Uses Gemini for relevance filtering, category classification, semantic deduplication, importance judgment, and one-line summaries.
+- Adds a second chapter of keyword-based news briefs gathered from Google News RSS and filtered through the same Gemini triage.
 - Writes per-run output plus an HTML archive index.
 
 ## Quick Start
@@ -43,6 +44,9 @@ Each run writes to `output/YYYYMMDD-HHMMSS/`.
 - `raw_items.json`: all collected raw items
 - `triaged_items.json`: Gemini or heuristic triage results
 - `selected_items.json`: final selected representatives
+- `news_raw_items.json`: keyword-news raw items
+- `news_triaged_items.json`: keyword-news triage results
+- `news_selected_items.json`: final selected keyword-news items
 - `digest.json`: machine-readable digest
 - `message_digest.md`: Telegram-friendly digest
 - `summary.md`: run summary
@@ -67,6 +71,9 @@ The root `output/index.html` file lists recent runs as a lightweight archive pag
 - `PERFORMING_ARTS_MONITOR_MAX_TOTAL_ITEMS`
 - `PERFORMING_ARTS_MONITOR_MAX_ITEMS_PER_CATEGORY`
 - `PERFORMING_ARTS_MONITOR_SCORE_THRESHOLD`
+- `PERFORMING_ARTS_MONITOR_MAX_NEWS_ITEMS`
+- `PERFORMING_ARTS_MONITOR_NEWS_SCORE_THRESHOLD`
+- `PERFORMING_ARTS_MONITOR_NEWS_PER_QUERY_LIMIT`
 - `PERFORMING_ARTS_MONITOR_PUBLIC_ARCHIVE_BASE_URL`
 - `PERFORMING_ARTS_MONITOR_TRACKED_PEOPLE`
 - `PERFORMING_ARTS_MONITOR_TRACKED_KEYWORDS`
@@ -89,6 +96,7 @@ The initial MVP collects from:
 The workflow is defined in `.github/workflows/daily-monitor.yml`.
 
 - Schedule: weekdays `09:00 KST`
+- Actual GitHub cron is set to `09:07 KST` to avoid the top-of-hour schedule drop zone while still treating the write slot as `09:00 KST`
 - Default collection window: from the previous scheduled write slot to the current run time
 - Manual `workflow_dispatch` runs default to a `72h` override for easier validation
 - Telegram delivery is enabled when Telegram secrets are present

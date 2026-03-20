@@ -142,12 +142,13 @@ Return exactly one JSON object with this shape:
 Rules:
 - `category` must be one of: audition, support, works_casting, people, company_news.
 - Mark `relevant=false` and `keep=false` for unrelated or very low-signal items.
+- For `source_kind = news_search`, keep only items that are clearly tied to the Korean musical or performing arts industry and the tracked keywords or tracked people.
 - Use `support` only for actual grants, support programs, open calls, creation support, or public arts funding.
 - Use `audition` for auditions, casting calls, applicant notices, pass/fail notices, and application schedules.
 - Use `works_casting` for casting news, production lineups, opening schedules, ticket opening only when the item signals a meaningful production development, or major work movement.
 - Use `people` for concrete actor or creator movement, awards, interviews with real industry significance, notable comments, or tracked-person developments.
 - Use `company_news` for company announcements, hiring notices, partnerships, launches, and official corporate updates.
-- Ticket opening alone is lower-signal unless it indicates a major production milestone or tracked person relevance.
+- Ticket opening alone is lower-signal unless it indicates a major production milestone or tracked person relevance, and it should usually rank below actionable audition or support items.
 - Completed or closed notices can still be relevant if they are final results for a major audition or a notable production update.
 - `duplicate_key` should be the same when multiple items describe the same underlying event.
 - `importance` is 0-100 and should reflect practical importance for a daily industry monitor.

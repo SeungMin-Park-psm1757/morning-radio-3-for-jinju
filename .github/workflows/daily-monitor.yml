@@ -8,7 +8,7 @@ on:
         required: false
         default: "72"
   schedule:
-    - cron: "0 0 * * 1-5"
+    - cron: "7 0 * * 1-5"
 
 concurrency:
   group: daily-performing-arts-monitor-${{ github.ref }}
@@ -29,6 +29,9 @@ jobs:
       PERFORMING_ARTS_MONITOR_SCHEDULE_HOUR_LOCAL: "9"
       PERFORMING_ARTS_MONITOR_WEEKDAYS_ONLY: "true"
       PERFORMING_ARTS_MONITOR_SCORE_THRESHOLD: "55"
+      PERFORMING_ARTS_MONITOR_MAX_NEWS_ITEMS: "4"
+      PERFORMING_ARTS_MONITOR_NEWS_SCORE_THRESHOLD: "48"
+      PERFORMING_ARTS_MONITOR_NEWS_PER_QUERY_LIMIT: "8"
       PERFORMING_ARTS_MONITOR_MAX_TOTAL_ITEMS: "8"
       PERFORMING_ARTS_MONITOR_MAX_ITEMS_PER_CATEGORY: "3"
       PERFORMING_ARTS_MONITOR_OUTPUT_DIR: output

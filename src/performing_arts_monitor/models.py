@@ -117,6 +117,7 @@ class DigestRun:
     intro: str
     sections: list[DigestSection]
     generated_at: datetime
+    news_items: list[TriagedItem] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -124,4 +125,5 @@ class DigestRun:
             "intro": self.intro,
             "generated_at": self.generated_at.isoformat(),
             "sections": [section.to_dict() for section in self.sections],
+            "news_items": [item.to_dict() for item in self.news_items],
         }

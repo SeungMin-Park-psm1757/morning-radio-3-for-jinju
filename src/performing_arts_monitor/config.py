@@ -86,6 +86,9 @@ class AppConfig:
     max_total_items: int
     max_items_per_category: int
     score_threshold: float
+    max_news_items: int
+    news_score_threshold: float
+    news_per_query_limit: int
     max_source_items: int
     request_timeout_seconds: int
     skip_llm: bool
@@ -176,6 +179,9 @@ def load_config(args: argparse.Namespace) -> AppConfig:
         max_total_items=int(os.getenv("PERFORMING_ARTS_MONITOR_MAX_TOTAL_ITEMS", "8")),
         max_items_per_category=int(os.getenv("PERFORMING_ARTS_MONITOR_MAX_ITEMS_PER_CATEGORY", "3")),
         score_threshold=float(os.getenv("PERFORMING_ARTS_MONITOR_SCORE_THRESHOLD", "55")),
+        max_news_items=int(os.getenv("PERFORMING_ARTS_MONITOR_MAX_NEWS_ITEMS", "4")),
+        news_score_threshold=float(os.getenv("PERFORMING_ARTS_MONITOR_NEWS_SCORE_THRESHOLD", "48")),
+        news_per_query_limit=int(os.getenv("PERFORMING_ARTS_MONITOR_NEWS_PER_QUERY_LIMIT", "8")),
         max_source_items=int(os.getenv("PERFORMING_ARTS_MONITOR_MAX_SOURCE_ITEMS", "20")),
         request_timeout_seconds=int(os.getenv("PERFORMING_ARTS_MONITOR_REQUEST_TIMEOUT_SECONDS", "30")),
         skip_llm=args.skip_llm,

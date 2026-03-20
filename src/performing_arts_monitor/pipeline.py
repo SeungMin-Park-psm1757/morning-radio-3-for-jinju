@@ -19,6 +19,7 @@ from performing_arts_monitor.models import (
     DigestSection,
     TriagedItem,
 )
+from performing_arts_monitor.news_brief import collect_keyword_news
 from performing_arts_monitor.sources import collect_items
 from performing_arts_monitor.telegram import send_digest
 
@@ -133,7 +134,16 @@ def run_pipeline(config: AppConfig) -> Path:
     triaged_items = _triage_items(config, raw_items, now_utc)
     selected_items = _select_items(config, triaged_items)
     sections = _build_sections(selected_items)
-    digest = _build_digest(config, sections, now_utc, source_errors)
+
+    news_raw_items: list[CollectedItem] = []
+    try:
+        news_raw_items = collect_keyword_news(config=config, start_utc=start_utc, now=now_utc)
+    except Exception as exc:  # pragma: no cover - resilience path
+        source_errors["keyword_news"] = str(exc)
+    news_triaged_items = _triage_items(config, news_raw_items, now_utc)
+    news_selected_items = _select_news_items(config, news_triaged_items)
+
+    digest = _build_digest(config, sections, news_selected_items, now_utc, source_errors)
     message_digest = _render_message_digest(digest, config.timezone, source_errors)
 
     _write_json(
@@ -147,6 +157,18 @@ def run_pipeline(config: AppConfig) -> Path:
     _write_json(
         run_dir / "selected_items.json",
         {"generated_at": now_utc.isoformat(), "items": [item.to_dict() for item in selected_items]},
+    )
+    _write_json(
+        run_dir / "news_raw_items.json",
+        {"generated_at": now_utc.isoformat(), "items": [item.to_dict() for item in news_raw_items]},
+    )
+    _write_json(
+        run_dir / "news_triaged_items.json",
+        {"generated_at": now_utc.isoformat(), "items": [item.to_dict() for item in news_triaged_items]},
+    )
+    _write_json(
+        run_dir / "news_selected_items.json",
+        {"generated_at": now_utc.isoformat(), "items": [item.to_dict() for item in news_selected_items]},
     )
     _write_json(run_dir / "digest.json", digest.to_dict())
     (run_dir / "message_digest.md").write_text(message_digest, encoding="utf-8")
@@ -170,6 +192,9 @@ def run_pipeline(config: AppConfig) -> Path:
         raw_items=raw_items,
         triaged_items=triaged_items,
         selected_items=selected_items,
+        news_raw_items=news_raw_items,
+        news_triaged_items=news_triaged_items,
+        news_selected_items=news_selected_items,
         sections=sections,
         source_errors=source_errors,
         telegram_metadata=telegram_metadata,
@@ -191,6 +216,9 @@ def run_pipeline(config: AppConfig) -> Path:
             "raw_item_count": len(raw_items),
             "triaged_item_count": len(triaged_items),
             "selected_item_count": len(selected_items),
+            "news_raw_item_count": len(news_raw_items),
+            "news_triaged_item_count": len(news_triaged_items),
+            "news_selected_item_count": len(news_selected_items),
         },
     )
     return run_dir
@@ -366,6 +394,8 @@ def _local_assessment(
     actionability = 0.0
     if category in {"audition", "support"}:
         actionability += 10.0
+        if item.source_kind.startswith("official_"):
+            actionability += 3.0
         if "마감임박" in secondary_tags:
             actionability += 3.0
         if item.attachments:
@@ -384,18 +414,22 @@ def _local_assessment(
         impact += min(len(headline_people) * 5.0, 10.0)
     elif matched_people:
         impact += min(len(matched_people) * 1.5, 4.5)
+    if matched_people and item.source_kind in {"official_news", "news_search"}:
+        impact += 3.0
     if mentioned_works:
         impact += min(len(mentioned_works) * 2.0, 6.0)
     if any(term in text.lower() for term in ("브로드웨이", "웨스트엔드", "국립정동극장", "초연", "30주년", "월드")):
         impact += 4.0
 
     keyword_boost = min((len(headline_keywords) * 2.0) + (max(0, len(matched_keywords) - len(headline_keywords)) * 1.0), 6.0)
+    if item.source_kind == "news_search" and matched_keywords:
+        keyword_boost = min(keyword_boost + 2.0, 8.0)
     content_richness = min(len(item.body_text) / 700.0, 1.0) * 4.0
     headline_low_signal_hits = _count_hits(headline_text, LOW_SIGNAL_TERMS)
     body_low_signal_hits = max(0, _count_hits(text, LOW_SIGNAL_TERMS) - headline_low_signal_hits)
     low_signal_penalty = min((headline_low_signal_hits * 8.0) + (body_low_signal_hits * 2.0), 18.0)
-    if "티켓오픈" in secondary_tags and category != "works_casting":
-        low_signal_penalty = min(22.0, low_signal_penalty + 4.0)
+    if "티켓오픈" in secondary_tags:
+        low_signal_penalty = min(24.0, low_signal_penalty + (2.0 if headline_people else 6.0))
     status_penalty = min(_count_hits(headline_text, STATUS_TERMS) * 3.0, 9.0)
     if "합격발표" in secondary_tags:
         status_penalty = max(0.0, status_penalty - 4.0)
@@ -528,6 +562,50 @@ def _select_items(config: AppConfig, triaged_items: list[TriagedItem]) -> list[T
     return sorted(fallback_selected, key=lambda item: (CATEGORY_ORDER.index(item.category), -item.final_score))
 
 
+def _select_news_items(config: AppConfig, triaged_items: list[TriagedItem]) -> list[TriagedItem]:
+    strict_candidates = [
+        item
+        for item in triaged_items
+        if item.keep
+        and item.final_score >= config.news_score_threshold
+        and item.category in {"audition", "support", "works_casting", "people", "company_news"}
+        and ("티켓오픈" not in item.secondary_tags or bool(item.mentioned_people))
+    ]
+    strict_candidates.sort(
+        key=lambda item: (
+            bool(item.mentioned_people),
+            item.category in {"people", "works_casting", "support"},
+            item.final_score,
+            item.published_at,
+        ),
+        reverse=True,
+    )
+
+    selected: list[TriagedItem] = []
+    category_counts: dict[str, int] = {}
+    for item in strict_candidates:
+        category_count = category_counts.get(item.category, 0)
+        if category_count >= 2:
+            continue
+        selected.append(item)
+        category_counts[item.category] = category_count + 1
+        if len(selected) >= config.max_news_items:
+            break
+    if selected:
+        return selected
+
+    fallback_threshold = max(44.0, config.news_score_threshold - 4.0)
+    fallback_candidates = [
+        item
+        for item in triaged_items
+        if item.keep
+        and item.final_score >= fallback_threshold
+        and item.category in {"support", "works_casting", "people"}
+    ]
+    fallback_candidates.sort(key=lambda item: (bool(item.mentioned_people), item.final_score, item.published_at), reverse=True)
+    return fallback_candidates[: config.max_news_items]
+
+
 def _build_sections(items: list[TriagedItem]) -> list[DigestSection]:
     sections: list[DigestSection] = []
     for category in CATEGORY_ORDER:
@@ -548,29 +626,41 @@ def _build_sections(items: list[TriagedItem]) -> list[DigestSection]:
 def _build_digest(
     config: AppConfig,
     sections: list[DigestSection],
+    news_items: list[TriagedItem],
     now_utc: datetime,
     source_errors: dict[str, str],
 ) -> DigestRun:
     local_now = now_utc.astimezone(config.timezone)
     title = f"{local_now.strftime('%Y-%m-%d')} 한국 뮤지컬/공연예술 모니터"
-    intro = _build_intro(sections, source_errors)
+    intro = _build_intro(sections, news_items, source_errors)
     return DigestRun(
         title=title,
         intro=intro,
         sections=sections,
+        news_items=news_items,
         generated_at=now_utc,
     )
 
 
-def _build_intro(sections: list[DigestSection], source_errors: dict[str, str]) -> str:
-    total = sum(len(section.items) for section in sections)
-    if total == 0:
+def _build_intro(
+    sections: list[DigestSection],
+    news_items: list[TriagedItem],
+    source_errors: dict[str, str],
+) -> str:
+    monitor_total = sum(len(section.items) for section in sections)
+    news_total = len(news_items)
+    if monitor_total == 0 and news_total == 0:
         if source_errors:
             return "오늘은 선별 항목이 없었고 일부 소스 수집에 실패했습니다."
         return "오늘은 기준 점수를 넘는 공식 공지나 업계 동향이 많지 않았습니다."
 
-    parts = [f"{section.label} {len(section.items)}건" for section in sections]
-    joined = ", ".join(parts)
+    parts: list[str] = []
+    if monitor_total:
+        monitor_parts = [f"{section.label} {len(section.items)}건" for section in sections]
+        parts.append(f"공식 모니터에서 {', '.join(monitor_parts)}")
+    if news_total:
+        parts.append(f"키워드 뉴스 {news_total}건")
+    joined = parts[0] if len(parts) == 1 else f"{parts[0]}과 {parts[1]}"
     if source_errors:
         return f"오늘은 {joined}을 추렸고 일부 소스 수집 오류가 있었습니다."
     return f"오늘은 {joined}을 추렸습니다."
@@ -582,10 +672,27 @@ def _render_message_digest(
     source_errors: dict[str, str],
 ) -> str:
     lines = [f"# {digest.title}", "", digest.intro]
+    lines.append("")
+    lines.append("## 챕터 1. 공식 모니터")
+    if not digest.sections:
+        lines.append("- 선별 항목 없음")
     for section in digest.sections:
         lines.append("")
-        lines.append(f"## {section.label}")
+        lines.append(f"### {section.label}")
         for item in section.items:
+            lines.append(f"- **{item.title}**")
+            lines.append(f"  요약: {item.one_line_summary}")
+            if item.watch_point:
+                lines.append(f"  체크: {item.watch_point}")
+            lines.append(
+                f"  출처: {item.site_name} | {item.published_at.astimezone(timezone).strftime('%Y-%m-%d')}"
+            )
+            lines.append(f"  링크: {item.canonical_url}")
+            lines.append("")
+    if digest.news_items:
+        lines.append("")
+        lines.append("## 챕터 2. 키워드 뉴스 브리프")
+        for item in digest.news_items:
             lines.append(f"- **{item.title}**")
             lines.append(f"  요약: {item.one_line_summary}")
             if item.watch_point:
@@ -611,6 +718,9 @@ def _render_summary(
     raw_items: list[CollectedItem],
     triaged_items: list[TriagedItem],
     selected_items: list[TriagedItem],
+    news_raw_items: list[CollectedItem],
+    news_triaged_items: list[TriagedItem],
+    news_selected_items: list[TriagedItem],
     sections: list[DigestSection],
     source_errors: dict[str, str],
     telegram_metadata: dict[str, Any],
@@ -623,16 +733,27 @@ def _render_summary(
         f"- 시간 범위(UTC): `{start_utc.isoformat()}` ~ `{end_utc.isoformat()}`",
         f"- LLM 사용: `{config.llm_enabled}`",
         f"- 텔레그램 전송: `{telegram_metadata.get('sent', False)}`",
-        f"- 수집 원시 아이템: `{len(raw_items)}`",
-        f"- 분류 완료 아이템: `{len(triaged_items)}`",
-        f"- 최종 선별 아이템: `{len(selected_items)}`",
+        f"- 챕터 1 원시 아이템: `{len(raw_items)}`",
+        f"- 챕터 1 분류 아이템: `{len(triaged_items)}`",
+        f"- 챕터 1 선별 아이템: `{len(selected_items)}`",
+        f"- 챕터 2 뉴스 원시 아이템: `{len(news_raw_items)}`",
+        f"- 챕터 2 뉴스 분류 아이템: `{len(news_triaged_items)}`",
+        f"- 챕터 2 뉴스 선별 아이템: `{len(news_selected_items)}`",
         "",
-        "## 섹션 현황",
+        "## 챕터 1 현황",
     ]
     for section in sections:
         lines.append(f"- {section.label}: {len(section.items)}건")
     if not sections:
         lines.append("- 선별된 항목 없음")
+
+    lines.append("")
+    lines.append("## 챕터 2 현황")
+    if news_selected_items:
+        for item in news_selected_items:
+            lines.append(f"- {item.category_label}: {item.title}")
+    else:
+        lines.append("- 선별된 뉴스 없음")
 
     lines.append("")
     lines.append("## 수집 오류")
@@ -648,6 +769,9 @@ def _render_summary(
         "raw_items.json",
         "triaged_items.json",
         "selected_items.json",
+        "news_raw_items.json",
+        "news_triaged_items.json",
+        "news_selected_items.json",
         "digest.json",
         "message_digest.md",
         "summary.md",
