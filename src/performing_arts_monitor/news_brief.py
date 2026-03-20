@@ -36,6 +36,41 @@ ARTICLE_BODY_SELECTORS = (
     ".post-content",
     ".article_txt",
 )
+DOMAIN_BODY_SELECTORS = {
+    "v.daum.net": (
+        "#harmonyContainer",
+        "#mArticle",
+        "article",
+    ),
+    "sportsseoul.com": (
+        "article",
+        "#contents",
+        ".article_view",
+        ".news_view",
+    ),
+    "sportsworldi.com": (
+        "article",
+        "#article_content",
+        ".view_con",
+    ),
+    "xportsnews.com": (
+        "#articletxt",
+        "article",
+        ".article-body",
+    ),
+}
+LOW_QUALITY_SUMMARIES = {
+    "",
+    "msn",
+    "google 뉴스",
+    "google news",
+}
+TRAILING_CUT_MARKERS = (
+    "해당 언론사로 이동합니다.",
+    "무단전재 및 재배포 금지",
+    "기사추천 ",
+    "Copyright",
+)
 
 PERFORMANCE_CONTEXT_TERMS = (
     "뮤지컬",
@@ -124,7 +159,7 @@ def collect_keyword_news(
     queries = _build_queries(config, hours_back=max(24, math.ceil((now - start_utc).total_seconds() / 3600.0)))
     collected: dict[str, CollectedItem] = {}
     resolved_url_cache: dict[str, str] = {}
-    article_cache: dict[str, tuple[str, str, str | None]] = {}
+    article_cache: dict[str, tuple[str, str, str | None, float]] = {}
 
     for query in queries:
         url = GOOGLE_NEWS_SEARCH.format(query=quote_plus(query.query))
@@ -160,10 +195,17 @@ def collect_keyword_news(
                 resolved_url_cache[link] = resolved_url
             article_payload = article_cache.get(resolved_url)
             if article_payload is None:
-                article_payload = _fetch_article_detail(resolved_url, timeout=config.request_timeout_seconds)
+                article_payload = _fetch_article_detail(
+                    resolved_url,
+                    title=title,
+                    timeout=config.request_timeout_seconds,
+                )
                 article_cache[resolved_url] = article_payload
-            article_summary, article_body, article_url = article_payload
+            article_summary, article_body, article_url, article_quality = article_payload
             effective_url = article_url or resolved_url
+            effective_domain = _extract_domain(effective_url)
+            if article_quality < _minimum_article_quality(effective_domain):
+                continue
             if article_summary:
                 summary = article_summary
             if article_body:
@@ -174,7 +216,14 @@ def collect_keyword_news(
                     continue
 
             fingerprint = _fingerprint(title, source_name, effective_url)
-            source_weight = _source_weight(source_name, effective_url, matched_people, matched_keywords, combined)
+            source_weight = _source_weight(
+                source_name,
+                effective_url,
+                matched_people,
+                matched_keywords,
+                combined,
+                article_quality=article_quality,
+            )
             collected.setdefault(
                 fingerprint,
                 CollectedItem(
@@ -197,6 +246,8 @@ def collect_keyword_news(
                         "matched_people": matched_people,
                         "matched_keywords": matched_keywords,
                         "source_url": link,
+                        "article_quality": article_quality,
+                        "resolved_domain": effective_domain,
                     },
                 ),
             )
@@ -335,7 +386,7 @@ def _resolve_google_news_url(source_url: str, *, timeout: int) -> str | None:
         return None
 
 
-def _fetch_article_detail(url: str, *, timeout: int) -> tuple[str, str, str | None]:
+def _fetch_article_detail(url: str, *, title: str, timeout: int) -> tuple[str, str, str | None, float]:
     try:
         response = requests.get(
             url,
@@ -345,29 +396,31 @@ def _fetch_article_detail(url: str, *, timeout: int) -> tuple[str, str, str | No
         response.raise_for_status()
         content_type = (response.headers.get("content-type") or "").lower()
         if "text/html" not in content_type:
-            return "", "", response.url
+            return "", "", response.url, 0.0
+        domain = _extract_domain(response.url or url)
         soup = BeautifulSoup(response.text[:900000], "html.parser")
-        summary = (
+        summary = _clean_summary_text(
             _extract_meta_content(soup, "og:description", "property")
             or _extract_meta_content(soup, "description", "name")
-            or _extract_meta_content(soup, "twitter:description", "name")
+            or _extract_meta_content(soup, "twitter:description", "name"),
+            domain=domain,
         )
-        body_text = ""
-        for selector in ARTICLE_BODY_SELECTORS:
-            node = soup.select_one(selector)
-            if node is None:
-                continue
-            text = _normalize_whitespace(node.get_text(" ", strip=True))
-            if len(text) >= 120:
-                body_text = text[:3200]
-                break
-        if not body_text:
-            body_text = _normalize_whitespace(soup.get_text(" ", strip=True))[:3200]
-        if (not summary or len(summary) < 20 or summary.lower() in {"msn", "google 뉴스", "google news"}) and body_text:
+        body_text = _extract_body_text(
+            soup,
+            domain=domain,
+            title=title,
+            summary=summary,
+        )
+        if body_text:
+            body_text = _clean_body_text(body_text, domain=domain, title=title, summary=summary)
+        if _is_low_quality_summary(summary, title) and body_text:
             summary = _first_sentences(body_text)
-        return summary, body_text, response.url
+        if _is_low_quality_summary(summary, title):
+            summary = _headline_fallback_summary(title)
+        article_quality = _article_quality(title=title, summary=summary, body_text=body_text, domain=domain)
+        return summary, body_text, response.url, article_quality
     except Exception:
-        return "", "", None
+        return "", "", None, 0.0
 
 
 def _extract_meta_content(soup: BeautifulSoup, key: str, attribute: str) -> str:
@@ -410,6 +463,8 @@ def _source_weight(
     matched_people: list[str],
     matched_keywords: list[str],
     combined_text: str,
+    *,
+    article_quality: float,
 ) -> float:
     score = 6.0
     domain = _extract_domain(url)
@@ -419,6 +474,7 @@ def _source_weight(
             break
     if any(signal in domain for signal in LOW_SIGNAL_DOMAINS):
         score -= 4.0
+    score += max(-6.0, min((article_quality - 0.45) * 8.0, 3.0))
     score += min(len(matched_people) * 2.5, 6.0)
     score += min(len(matched_keywords) * 1.2, 4.0)
     score += min(sum(1 for term in NEWS_PRIORITY_TERMS if term.lower() in combined_text.lower()) * 1.2, 4.0)
@@ -435,12 +491,153 @@ def _normalize_whitespace(text: str) -> str:
 
 
 def _first_sentences(text: str, *, max_chars: int = 240) -> str:
-    cleaned = _normalize_whitespace(text)
-    cleaned = re.sub(r"^\[[^\]]{0,80}\]\s*", "", cleaned)
-    cleaned = re.sub(r"^[가-힣A-Za-z0-9·\s]+?\|\s*[가-힣A-Za-z0-9·\s]{0,40}기자\s*", "", cleaned)
+    cleaned = _clean_summary_text(text, domain="")
     if len(cleaned) <= max_chars:
         return cleaned
     match = re.match(r"(.{40,240}?[.!?])(?:\s|$)", cleaned)
     if match:
         return match.group(1).strip()
     return cleaned[: max_chars - 1].rstrip() + "…"
+
+
+def _extract_body_text(
+    soup: BeautifulSoup,
+    *,
+    domain: str,
+    title: str,
+    summary: str,
+) -> str:
+    for selector in _body_selectors_for_domain(domain):
+        node = soup.select_one(selector)
+        if node is None:
+            continue
+        text = _normalize_whitespace(node.get_text(" ", strip=True))
+        if len(text) < 120:
+            continue
+        aligned = _align_body_to_summary(text, summary)
+        if aligned:
+            return aligned[:3200]
+
+    fallback_text = _normalize_whitespace(soup.get_text(" ", strip=True))
+    fallback_text = _align_body_to_summary(fallback_text, summary)
+    if _normalize_whitespace(title) and fallback_text.startswith(_normalize_whitespace(title)):
+        fallback_text = fallback_text[len(_normalize_whitespace(title)) :].strip()
+    return fallback_text[:3200]
+
+
+def _body_selectors_for_domain(domain: str) -> tuple[str, ...]:
+    selectors: list[str] = []
+    for suffix, domain_selectors in DOMAIN_BODY_SELECTORS.items():
+        if domain.endswith(suffix):
+            selectors.extend(domain_selectors)
+    selectors.extend(ARTICLE_BODY_SELECTORS)
+    return tuple(dict.fromkeys(selectors))
+
+
+def _align_body_to_summary(text: str, summary: str) -> str:
+    cleaned = _normalize_whitespace(text)
+    anchor = _normalize_whitespace(summary)
+    if len(anchor) < 16:
+        return cleaned
+    for width in (48, 36, 28, 20, 16):
+        if len(anchor) < width:
+            continue
+        probe = anchor[:width]
+        index = cleaned.find(probe)
+        if index >= 0:
+            return cleaned[index:]
+    return cleaned
+
+
+def _clean_summary_text(text: str, *, domain: str) -> str:
+    cleaned = _normalize_whitespace(html.unescape(text))
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"^\[[^\]]{0,80}\]\s*", "", cleaned)
+    cleaned = re.sub(r"^[가-힣A-Za-z0-9·\s]+?\|\s*[가-힣A-Za-z0-9·\s]{0,40}기자\s*", "", cleaned)
+    cleaned = re.sub(r"^[가-힣A-Za-z]+\s*\|\s*[가-힣A-Za-z]+\s+", "", cleaned)
+    cleaned = re.sub(r"^[가-힣A-Za-z]{2,20}\s+기자\s*=\s*", "", cleaned)
+    cleaned = re.sub(r"^[가-힣A-Za-z]{2,20}\s+기자\s+", "", cleaned)
+    cleaned = re.sub(r"^입력\s*\d{4}[.-]\s*\d{1,2}[.-]\s*\d{1,2}[^가-힣A-Za-z0-9]+", "", cleaned)
+    if domain.endswith("sportsseoul.com"):
+        cleaned = re.sub(r"^경제\s*\|\s*생활문화\s*", "", cleaned)
+    return _normalize_whitespace(cleaned)
+
+
+def _clean_body_text(text: str, *, domain: str, title: str, summary: str) -> str:
+    cleaned = _normalize_whitespace(html.unescape(text))
+    if not cleaned:
+        return ""
+    if domain.endswith("v.daum.net"):
+        cleaned = re.sub(r"^.*?쇼온컴퍼니 제공\s*", "", cleaned)
+        cleaned = re.sub(r"^.*?인쇄하기\s*", "", cleaned)
+    if domain.endswith("sportsseoul.com"):
+        cleaned = re.sub(r"^경제\s*\|\s*생활문화\s*", "", cleaned)
+        cleaned = re.sub(r"^입력\s*\d{4}-\d{2}-\d{2}[^가-힣A-Za-z0-9]+", "", cleaned)
+        cleaned = re.sub(r"^북마크\s+페이스북\s+트위터\s+SNS 더보기\s+", "", cleaned)
+        cleaned = re.sub(r"^가\s+글자크기설정\s+인쇄\s+SNS 더보기\s+닫기\s+", "", cleaned)
+        cleaned = re.sub(r"^네이버밴드\s+네이버블로그\s+URL복사\s+", "", cleaned)
+    cleaned = _align_body_to_summary(cleaned, summary)
+    cleaned = _clean_summary_text(cleaned, domain=domain)
+    for marker in TRAILING_CUT_MARKERS:
+        index = cleaned.find(marker)
+        if index > 120:
+            cleaned = cleaned[:index].rstrip()
+            break
+    normalized_title = _normalize_whitespace(title)
+    if normalized_title and cleaned.startswith(normalized_title):
+        cleaned = cleaned[len(normalized_title) :].strip()
+    cleaned = re.sub(r"\b[0-9A-Za-z._%+-]+@[0-9A-Za-z.-]+\.[A-Za-z]{2,}\b.*$", "", cleaned)
+    cleaned = re.sub(r"\s+\*재판매 및 DB 금지.*$", "", cleaned)
+    cleaned = re.sub(r"\s+◎공감언론.*$", "", cleaned)
+    cleaned = re.sub(r"\s+[가-힣A-Za-z]{2,20}\s+기자$", "", cleaned)
+    cleaned = _normalize_whitespace(cleaned)
+    return cleaned[:3200]
+
+
+def _is_low_quality_summary(summary: str, title: str) -> bool:
+    normalized_summary = _normalize_whitespace(summary).lower()
+    normalized_title = _normalize_whitespace(title).lower()
+    if normalized_summary in LOW_QUALITY_SUMMARIES:
+        return True
+    if len(normalized_summary) < 24:
+        return True
+    if normalized_summary == normalized_title:
+        return True
+    return False
+
+
+def _headline_fallback_summary(title: str) -> str:
+    cleaned = _normalize_whitespace(title).strip("\"'“”")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\s*…\s*", " ", cleaned)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return ""
+    if cleaned.endswith((".", "다.")):
+        return cleaned
+    if any(token in cleaned for token in ("인터뷰", "해명", "합류", "개막", "수상", "캐스팅", "복귀", "출연")):
+        return f"{cleaned} 관련 보도다."
+    return cleaned
+
+
+def _article_quality(*, title: str, summary: str, body_text: str, domain: str) -> float:
+    normalized_title = _normalize_whitespace(title)
+    normalized_summary = _normalize_whitespace(summary)
+    normalized_body = _normalize_whitespace(body_text)
+    if domain.endswith("msn.com") and normalized_body.lower() in LOW_QUALITY_SUMMARIES:
+        return 0.0
+    score = 0.0
+    if normalized_summary and normalized_summary.lower() not in LOW_QUALITY_SUMMARIES and normalized_summary.lower() != normalized_title.lower():
+        score += min(len(normalized_summary) / 180.0, 1.0) * 0.45
+    if normalized_body and normalized_body.lower() not in LOW_QUALITY_SUMMARIES:
+        score += min(len(normalized_body) / 1400.0, 1.0) * 0.55
+    if normalized_body and normalized_summary and normalized_summary[:30] in normalized_body:
+        score += 0.05
+    return round(min(score, 1.0), 2)
+
+
+def _minimum_article_quality(domain: str) -> float:
+    if domain.endswith("msn.com"):
+        return 0.35
+    return 0.05
