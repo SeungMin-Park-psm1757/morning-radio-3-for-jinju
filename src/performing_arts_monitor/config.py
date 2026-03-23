@@ -112,6 +112,11 @@ class AppConfig:
             return now_utc - timedelta(hours=self.hours_back)
 
         local_now = now_utc.astimezone(self.timezone)
+        current_slot = self._latest_scheduled_slot(local_now)
+        previous_slot = self._previous_scheduled_slot(current_slot)
+        return previous_slot.astimezone(UTC)
+
+    def _latest_scheduled_slot(self, local_now: datetime) -> datetime:
         candidate_date = local_now.date()
         current_clock = (
             local_now.hour,
@@ -120,20 +125,29 @@ class AppConfig:
             local_now.microsecond,
         )
         scheduled_clock = (self.schedule_hour_local, 0, 0, 0)
-        if current_clock <= scheduled_clock:
+        if current_clock < scheduled_clock:
             candidate_date -= timedelta(days=1)
-
         while self.weekdays_only and candidate_date.weekday() >= 5:
             candidate_date -= timedelta(days=1)
-
-        candidate_local = datetime(
+        return datetime(
             candidate_date.year,
             candidate_date.month,
             candidate_date.day,
             self.schedule_hour_local,
             tzinfo=self.timezone,
         )
-        return candidate_local.astimezone(UTC)
+
+    def _previous_scheduled_slot(self, slot_local: datetime) -> datetime:
+        candidate_date = slot_local.date() - timedelta(days=1)
+        while self.weekdays_only and candidate_date.weekday() >= 5:
+            candidate_date -= timedelta(days=1)
+        return datetime(
+            candidate_date.year,
+            candidate_date.month,
+            candidate_date.day,
+            self.schedule_hour_local,
+            tzinfo=self.timezone,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
