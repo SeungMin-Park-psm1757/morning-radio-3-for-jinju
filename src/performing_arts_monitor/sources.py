@@ -946,27 +946,30 @@ def _fingerprint(title: str, url: str, source_key: str) -> str:
 
 def _get(url: str, config: AppConfig, **kwargs: object) -> requests.Response:
     last_error: Exception | None = None
-    for attempt in range(3):
-        try:
-            response = requests.get(
-                url,
-                headers=REQUEST_HEADERS,
-                timeout=config.request_timeout_seconds,
-                **kwargs,
-            )
-            response.raise_for_status()
-            response.encoding = response.apparent_encoding or response.encoding
-            content_type = (response.headers.get("content-type") or "").lower()
-            if "text/html" in content_type:
-                lowered = response.text[:12000].lower()
-                if any(marker in lowered for marker in BLOCKED_MARKERS):
-                    raise ValueError(f"Blocked or challenge page detected for {url}")
-            return response
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-            last_error = exc
-            if attempt == 2:
-                raise
-            time_module.sleep(1.5 * (attempt + 1))
+    candidate_urls = _candidate_urls(url)
+    attempts_per_candidate = 1 if len(candidate_urls) > 1 else 3
+    for candidate_url in candidate_urls:
+        for attempt in range(attempts_per_candidate):
+            try:
+                response = requests.get(
+                    candidate_url,
+                    headers=REQUEST_HEADERS,
+                    timeout=_request_timeout_seconds(candidate_url, config),
+                    **kwargs,
+                )
+                response.raise_for_status()
+                response.encoding = response.apparent_encoding or response.encoding
+                content_type = (response.headers.get("content-type") or "").lower()
+                if "text/html" in content_type:
+                    lowered = response.text[:12000].lower()
+                    if any(marker in lowered for marker in BLOCKED_MARKERS):
+                        raise ValueError(f"Blocked or challenge page detected for {candidate_url}")
+                return response
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                last_error = exc
+                if attempt == attempts_per_candidate - 1:
+                    break
+                time_module.sleep(1.5 * (attempt + 1))
     if last_error is not None:
         raise last_error
     raise RuntimeError(f"Failed to fetch {url}")
@@ -975,3 +978,23 @@ def _get(url: str, config: AppConfig, **kwargs: object) -> requests.Response:
 def _get_soup(url: str, config: AppConfig) -> BeautifulSoup:
     response = _get(url, config)
     return BeautifulSoup(response.text[:700000], "html.parser")
+
+
+def _candidate_urls(url: str) -> list[str]:
+    parsed = urlparse(url)
+    candidates = [url]
+    if parsed.netloc not in {"www.odmusical.com", "odmusical.com"}:
+        return candidates
+
+    for host in ("www.odmusical.com", "odmusical.com"):
+        candidate = parsed._replace(netloc=host, scheme="https").geturl()
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _request_timeout_seconds(url: str, config: AppConfig) -> int:
+    host = urlparse(url).netloc.lower().strip()
+    if host in {"www.odmusical.com", "odmusical.com"}:
+        return max(config.request_timeout_seconds, 40)
+    return config.request_timeout_seconds

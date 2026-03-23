@@ -285,9 +285,12 @@ def _merge_assessment(
     canonical_url = _canonical_url_for_item(item)
     llm_score = float(llm.get("importance") or 0.0) if llm else 0.0
     final_score = local["local_score"]
+    local_news_override = _allow_local_news_override(item, local, llm)
     if llm:
         final_score = round((local["local_score"] * 0.6) + (llm_score * 0.4), 1)
-    keep = bool(llm_keep and llm_relevant and final_score >= local["candidate_threshold"])
+    if local_news_override:
+        final_score = max(final_score, local["local_score"])
+    keep = bool(final_score >= local["candidate_threshold"] and ((llm_keep and llm_relevant) or local_news_override))
     secondary_tags = (
         [str(tag).strip() for tag in llm.get("secondary_tags", []) if str(tag).strip()]
         if llm
@@ -361,6 +364,24 @@ def _merge_assessment(
         mentioned_works=mentioned_works,
         mentioned_organizations=mentioned_orgs,
     )
+
+
+def _allow_local_news_override(
+    item: CollectedItem,
+    local: dict[str, Any],
+    llm: dict[str, Any] | None,
+) -> bool:
+    if llm is None or item.source_kind != "news_search":
+        return False
+    if local["keep"] is not True:
+        return False
+    if local["local_score"] < max(55.0, local["score_threshold"]):
+        return False
+    if len(_normalize_whitespace(" ".join(value for value in (item.summary, item.body_text) if value))) < 80:
+        return False
+    if bool(llm.get("keep")) and bool(llm.get("relevant")):
+        return False
+    return True
 
 
 def _local_assessment(
