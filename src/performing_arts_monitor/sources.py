@@ -39,8 +39,8 @@ BLOCKED_MARKERS = (
     "cf-chl-",
 )
 
-OD_NOTICE_URL = "https://www.odmusical.com/audition/notice"
-OD_NEWS_URL = "https://www.odmusical.com/audition/notice2"
+OD_NOTICE_URL = "https://www.odmusical.com/kor/audition/notice"
+OD_NEWS_URL = "https://www.odmusical.com/kor/audition/notice2"
 EMK_AUDITION_FEED = "https://emkmusical.com/notice_audition/feed/"
 EMK_NOTICE_FEED = "https://emkmusical.com/notice/feed/"
 EMK_NEWS_FEED = "https://emkmusical.com/news/feed/"
@@ -986,10 +986,18 @@ def _candidate_urls(url: str) -> list[str]:
     if parsed.netloc not in {"www.odmusical.com", "odmusical.com"}:
         return candidates
 
-    for host in ("www.odmusical.com", "odmusical.com"):
-        candidate = parsed._replace(netloc=host, scheme="https").geturl()
-        if candidate not in candidates:
-            candidates.append(candidate)
+    path_variants = [parsed.path]
+    if parsed.path.startswith("/kor/"):
+        path_variants.append(parsed.path[4:] or "/")
+    else:
+        path_variants.append("/kor" + parsed.path)
+
+    for path in path_variants:
+        normalized_path = path or "/"
+        for host in ("www.odmusical.com", "odmusical.com"):
+            candidate = parsed._replace(netloc=host, scheme="https", path=normalized_path).geturl()
+            if candidate not in candidates:
+                candidates.append(candidate)
     return candidates
 
 

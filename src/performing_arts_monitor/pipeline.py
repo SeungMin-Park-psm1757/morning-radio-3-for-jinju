@@ -122,6 +122,10 @@ GENERIC_WORK_TITLES = {
     "시놉시스",
     "공지",
 }
+SOFT_SOURCE_ERROR_KEYS = {
+    "od_notice",
+    "od_news",
+}
 
 
 def run_pipeline(config: AppConfig) -> Path:
@@ -668,10 +672,14 @@ def _build_intro(
     news_items: list[TriagedItem],
     source_errors: dict[str, str],
 ) -> str:
+    visible_source_errors = _visible_source_errors(
+        source_errors,
+        has_selected_content=bool(sections or news_items),
+    )
     monitor_total = sum(len(section.items) for section in sections)
     news_total = len(news_items)
     if monitor_total == 0 and news_total == 0:
-        if source_errors:
+        if visible_source_errors:
             return "오늘은 선별 항목이 없었고 일부 소스 수집에 실패했습니다."
         return "오늘은 기준 점수를 넘는 공식 공지나 업계 동향이 많지 않았습니다."
 
@@ -682,7 +690,7 @@ def _build_intro(
     if news_total:
         parts.append(f"키워드 뉴스 {news_total}건")
     joined = parts[0] if len(parts) == 1 else f"{parts[0]}과 {parts[1]}"
-    if source_errors:
+    if visible_source_errors:
         return f"오늘은 {joined}을 추렸고 일부 소스 수집 오류가 있었습니다."
     return f"오늘은 {joined}을 추렸습니다."
 
@@ -692,6 +700,10 @@ def _render_message_digest(
     timezone: ZoneInfo,
     source_errors: dict[str, str],
 ) -> str:
+    visible_source_errors = _visible_source_errors(
+        source_errors,
+        has_selected_content=bool(digest.sections or digest.news_items),
+    )
     lines = [f"# {digest.title}", "", digest.intro]
     lines.append("")
     lines.append("## 챕터 1. 공식 모니터")
@@ -723,10 +735,10 @@ def _render_message_digest(
             )
             lines.append(f"  링크: {item.canonical_url}")
             lines.append("")
-    if source_errors:
+    if visible_source_errors:
         lines.append("")
         lines.append("## 수집 상태")
-        for key in sorted(source_errors):
+        for key in sorted(visible_source_errors):
             lines.append(f"- {key}: 수집 실패")
     return "\n".join(lines).strip() + "\n"
 
@@ -990,6 +1002,20 @@ def _first_sentence(text: str) -> str:
 
 def _normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _visible_source_errors(
+    source_errors: dict[str, str],
+    *,
+    has_selected_content: bool,
+) -> dict[str, str]:
+    if not has_selected_content:
+        return source_errors
+    return {
+        key: message
+        for key, message in source_errors.items()
+        if key not in SOFT_SOURCE_ERROR_KEYS
+    }
 
 
 def _public_links(config: AppConfig, run_dir: Path) -> dict[str, str] | None:
