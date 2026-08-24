@@ -42,7 +42,14 @@ AUDITION_TERMS = (
     "지원자",
     "지원 방법",
     "지원방법",
-    "모집",
+    "배우 모집",
+    "배우모집",
+    "배역 모집",
+    "배역모집",
+    "출연자 모집",
+    "출연자모집",
+    "단원 모집",
+    "단원모집",
     "모집요강",
     "서류",
     "서류전형",
@@ -499,14 +506,18 @@ def _merge_assessment(
     watch_point = str(llm.get("watch_point") or "").strip() if llm else ""
     if not watch_point:
         watch_point = local["watch_point"]
-    detail_bullets = local["detail_bullets"]
+    detail_bullets = _detail_bullets(item, category)
 
     exclude_reason = ""
     if not keep:
         exclude_reason = str(llm.get("exclude_reason") or "").strip() if llm else ""
         if not exclude_reason:
             exclude_reason = local["exclude_reason"]
-    if category not in OUTPUT_CATEGORY_SET:
+    profile_exclusion_reason = _audition_profile_exclusion_reason(item, category)
+    if profile_exclusion_reason:
+        keep = False
+        exclude_reason = profile_exclusion_reason
+    elif category not in OUTPUT_CATEGORY_SET:
         keep = False
         if not exclude_reason:
             if category == "people":
@@ -570,7 +581,7 @@ def _local_assessment(
     config: AppConfig,
     now_utc: datetime,
 ) -> dict[str, Any]:
-    headline_text = " ".join(value for value in (item.title, item.summary) if value)
+    headline_text = item.title
     text = _combined_text(item)
     headline_people = _find_mentions(headline_text, config.tracked_people)
     body_people = _find_mentions(item.body_text, config.tracked_people)
@@ -677,21 +688,13 @@ def _local_assessment(
     candidate_threshold = max(40.0, config.score_threshold - 10.0)
     keep = bool(category in CATEGORY_LABELS and local_score >= candidate_threshold)
     exclude_reason = ""
+    profile_exclusion_reason = _audition_profile_exclusion_reason(item, category)
     if category == "people":
         keep = False
         exclude_reason = "배우·인물 동향은 현재 모니터 대상에서 제외"
-    elif category == "audition" and audition_profile["child_hits"]:
+    elif profile_exclusion_reason:
         keep = False
-        exclude_reason = "아역·청소년 대상 오디션은 현재 모니터 대상에서 제외"
-    elif category == "audition" and audition_profile["genre_exclude_hits"]:
-        keep = False
-        exclude_reason = "K-pop·댄스팀·모델 계열 모집은 현재 모니터 대상에서 제외"
-    elif category == "audition" and audition_profile["male_hits"]:
-        keep = False
-        exclude_reason = "남성 배역이 함께 포함된 오디션은 현재 모니터 대상에서 제외"
-    elif category == "audition" and not audition_profile["female_hits"]:
-        keep = False
-        exclude_reason = "여성 배역·여성 모집 신호가 없는 오디션은 현재 모니터 대상에서 제외"
+        exclude_reason = profile_exclusion_reason
     elif category == "company_news" and not (headline_keywords or headline_people or mentioned_works):
         keep = False
         exclude_reason = "산업 관련성이 약함"
@@ -1059,6 +1062,22 @@ def _audition_profile_signals(text: str) -> dict[str, int]:
     }
 
 
+def _audition_profile_exclusion_reason(item: CollectedItem, category: str) -> str:
+    if category != "audition":
+        return ""
+
+    profile = _audition_profile_signals(_combined_text(item))
+    if profile["child_hits"]:
+        return "아역·청소년 대상 오디션은 현재 모니터 대상에서 제외"
+    if profile["genre_exclude_hits"]:
+        return "K-pop·댄스팀·모델 계열 모집은 현재 모니터 대상에서 제외"
+    if profile["male_hits"]:
+        return "남성 배역이 함께 포함된 오디션은 현재 모니터 대상에서 제외"
+    if not profile["female_hits"]:
+        return "여성 배역·여성 모집 신호가 없는 오디션은 현재 모니터 대상에서 제외"
+    return ""
+
+
 def _audition_detail_bullets(item: CollectedItem) -> list[str]:
     combined_text = _combined_text(item)
     when_text = _extract_audition_fact(
@@ -1237,6 +1256,8 @@ def _find_mentions(text: str, values: tuple[str, ...]) -> list[str]:
 
 def _extract_work_titles(text: str) -> list[str]:
     titles = re.findall(r"<([^<>]{1,40})>", text)
+    titles.extend(re.findall(r"[‘“「『《〈]([^’”」』》〉]{2,40})[’”」』》〉]", text))
+    titles.extend(re.findall(r"(?<![0-9A-Za-z])['\"]([^'\"]{2,40})['\"]", text))
     cleaned = [_normalize_whitespace(title) for title in titles if title.strip()]
     filtered = [
         title

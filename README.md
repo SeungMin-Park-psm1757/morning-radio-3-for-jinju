@@ -16,6 +16,12 @@ Performing Arts Monitor builds a daily Korean musical and performing arts digest
 - Adds a second chapter of keyword-based news briefs gathered from Google News RSS and filtered through the same Gemini triage.
 - Writes per-run output plus an HTML archive index.
 
+## Current Audition Focus
+
+- Keeps adult women-only stage audition notices.
+- Excludes child roles, mixed or men-only calls, and K-pop, dance-team, or model recruitment.
+- Prioritizes Seoul-area notices and renders audition timing, location or application route, and eligibility details as bullets.
+
 ## Quick Start
 
 ```bash
@@ -101,3 +107,4 @@ The workflow is defined in `.github/workflows/daily-monitor.yml`.
 - Manual `workflow_dispatch` runs default to a `72h` override for easier validation
 - Telegram delivery is enabled when Telegram secrets are present
 - Manual runs are supported with `workflow_dispatch`
+- A monthly heartbeat commit prevents GitHub from disabling the public repository's scheduled workflow after 60 days of inactivity.

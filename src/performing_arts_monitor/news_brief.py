@@ -454,7 +454,7 @@ def _looks_relevant(text: str, matched_people: list[str], matched_keywords: list
     has_context = any(term.lower() in lowered for term in PERFORMANCE_CONTEXT_TERMS)
     if not has_context:
         return False
-    if any(term in lowered for term in NEWS_EXCLUDE_TERMS) and not matched_people:
+    if any(term.lower() in lowered for term in NEWS_EXCLUDE_TERMS) and not matched_people:
         return False
     if any(term.lower() in lowered for term in NEWS_PENALTY_TERMS) and not matched_people:
         return False

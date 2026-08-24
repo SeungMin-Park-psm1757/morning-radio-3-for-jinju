@@ -14,6 +14,9 @@ concurrency:
   group: daily-performing-arts-monitor-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   build-monitor:
     runs-on: ubuntu-latest
@@ -71,3 +74,20 @@ jobs:
           name: performing-arts-monitor-output
           path: output/
           if-no-files-found: error
+
+      - name: Keep scheduled workflow active
+        if: github.event_name == 'schedule' && success()
+        shell: bash
+        run: |
+          heartbeat_file=".github/workflow-heartbeat"
+          today="$(date -u +%F)"
+          last="$(cat "$heartbeat_file" 2>/dev/null || true)"
+          if [[ -n "$last" ]] && (( $(date -u -d "$today" +%s) - $(date -u -d "$last" +%s) < 2592000 )); then
+            exit 0
+          fi
+          printf '%s\n' "$today" > "$heartbeat_file"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$heartbeat_file"
+          git commit -m "chore: keep scheduled monitor active"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
